@@ -14,6 +14,8 @@ CC:Tweaked apartment electricity meter for Create: Power Grid.
 - Saves the counter in `apartment_kwh.dat`.
 - Keeps the counter after computer restarts.
 - Automatically detects reconnects.
+- Records power outages with date/time when power goes off and when it returns.
+- Shows the last 5 outages as a checklist on screen.
 - No `require()` and no external libraries.
 
 ## Install
@@ -67,6 +69,10 @@ apartment_kwh.dat
 ```
 
 Then start `kwhmeter` again.
+
+## Outage checklist
+
+The meter detects a transition to approximately 0 W and records the outage start time. When power returns, it records the recovery time. Up to 10 events are stored; the screen shows the latest 5.
 
 ## Installer
 
