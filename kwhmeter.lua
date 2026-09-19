@@ -1,22 +1,18 @@
 -- PowerGridCC Apartment kWh Meter
--- Automatically discovers a Power Grid power gauge anywhere in the
--- connected peripheral network. No fixed side is required.
---
--- Priority:
--- 1. Peripheral type "powergrid_power_gauge"
--- 2. Compatible older gauge APIs exposing power() or getValue()
---
+-- Automatically discovers a Power Grid power gauge and records outages.
 -- CC:Tweaked only. No require() or external libraries.
 
 local DATA_FILE = "apartment_kwh.dat"
 local SAMPLE_SECONDS = 1
+local MAX_OUTAGES = 10
+
+local function now_text()
+    return os.date("%d.%m.%Y %H:%M:%S")
+end
 
 local function save(data)
     local file = fs.open(DATA_FILE, "w")
-    if not file then
-        error("Cannot open " .. DATA_FILE .. " for writing")
-    end
-
+    if not file then error("Cannot open " .. DATA_FILE .. " for writing") end
     file.write(textutils.serialize(data))
     file.close()
 end
@@ -24,45 +20,42 @@ end
 local function load()
     if not fs.exists(DATA_FILE) then
         local data = {
-            version = 2,
+            version = 3,
             total_kwh = 0,
-            samples = 0
+            samples = 0,
+            outages = {},
+            outage_active = false,
+            outage_start = nil
         }
         save(data)
         return data
     end
 
     local file = fs.open(DATA_FILE, "r")
-    if not file then
-        error("Cannot open " .. DATA_FILE .. " for reading")
-    end
+    if not file then error("Cannot open " .. DATA_FILE .. " for reading") end
 
     local raw = file.readAll()
     file.close()
 
     local data = textutils.unserialize(raw)
+    if type(data) ~= "table" then error("Invalid data file: " .. DATA_FILE) end
 
-    if type(data) ~= "table" then
-        error("Invalid data file: " .. DATA_FILE)
-    end
-
-    data.version = tonumber(data.version) or 2
+    data.version = 3
     data.total_kwh = tonumber(data.total_kwh) or 0
     data.samples = tonumber(data.samples) or 0
+    data.outages = type(data.outages) == "table" and data.outages or {}
+    data.outage_active = data.outage_active == true
+    data.outage_start = data.outage_start
 
     return data
 end
 
 local function has_method(name, method)
     local ok, methods = pcall(peripheral.getMethods, name)
-    if not ok or type(methods) ~= "table" then
-        return false
-    end
+    if not ok or type(methods) ~= "table" then return false end
 
     for _, listed in ipairs(methods) do
-        if listed == method then
-            return true
-        end
+        if listed == method then return true end
     end
 
     return false
@@ -71,7 +64,6 @@ end
 local function discover_gauge()
     local names = peripheral.getNames()
 
-    -- Prefer the exact Power Grid power-gauge peripheral.
     for _, name in ipairs(names) do
         local ptype = peripheral.getType(name)
 
@@ -82,7 +74,6 @@ local function discover_gauge()
         end
     end
 
-    -- Fallback for older/custom integrations.
     for _, name in ipairs(names) do
         if has_method(name, "power") or has_method(name, "getValue") then
             return name, peripheral.getType(name) or "unknown"
@@ -95,35 +86,24 @@ end
 local function call_number(name, method)
     local ok, value = pcall(peripheral.call, name, method)
 
-    if not ok then
-        return nil, tostring(value)
-    end
+    if not ok then return nil, tostring(value) end
 
     value = tonumber(value)
-    if not value then
-        return nil, "method did not return a number"
-    end
+    if not value then return nil, "method did not return a number" end
 
     return value
 end
 
 local function read_power(name)
-    -- Current Create: Power Grid CC:Tweaked API:
-    -- powergrid_power_gauge.power()
     if has_method(name, "power") then
         local value, err = call_number(name, "power")
-        if value then
-            return math.abs(value)
-        end
+        if value then return math.abs(value) end
         return nil, "power() failed: " .. tostring(err)
     end
 
-    -- Compatibility with older CC Power Grid integrations.
     if has_method(name, "getValue") then
         local value, err = call_number(name, "getValue")
-        if value then
-            return math.abs(value)
-        end
+        if value then return math.abs(value) end
         return nil, "getValue() failed: " .. tostring(err)
     end
 
@@ -138,6 +118,29 @@ local function format_energy(kwh)
     return string.format("%.3f kWh", kwh)
 end
 
+local function start_outage(data)
+    if data.outage_active then return end
+
+    data.outage_active = true
+    data.outage_start = now_text()
+end
+
+local function finish_outage(data)
+    if not data.outage_active then return end
+
+    table.insert(data.outages, 1, {
+        start = data.outage_start,
+        finish = now_text()
+    })
+
+    while #data.outages > MAX_OUTAGES do
+        table.remove(data.outages)
+    end
+
+    data.outage_active = false
+    data.outage_start = nil
+end
+
 local function draw(data, gauge_name, gauge_type, power, connected, error_text)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
@@ -146,40 +149,41 @@ local function draw(data, gauge_name, gauge_type, power, connected, error_text)
 
     print("APARTMENT POWER METER")
     print("=====================")
-    print("")
 
     if connected then
         term.setTextColor(colors.lime)
-        print("Status : CONNECTED")
+        print("ONLINE")
         term.setTextColor(colors.white)
-        print("Device : " .. tostring(gauge_name))
-        print("Type   : " .. tostring(gauge_type))
-        print(string.format("Power  : %.2f W", power or 0))
+        print(string.format("Power: %.2f W", power or 0))
     else
         term.setTextColor(colors.red)
-        print("Status : SEARCHING")
+        print("POWER OUTAGE")
         term.setTextColor(colors.white)
-        print("Device : not found")
-
-        if error_text then
-            print("")
-            term.setTextColor(colors.red)
-            print(error_text)
-            term.setTextColor(colors.white)
-        end
+        print(error_text or "No power detected")
     end
 
     print("")
-    print("TOTAL ENERGY")
-    term.setTextColor(colors.yellow)
-    print(format_energy(data.total_kwh))
-    term.setTextColor(colors.white)
+    print("TOTAL: " .. format_energy(data.total_kwh))
+    print("")
+    print("OUTAGE CHECKLIST")
+
+    if #data.outages == 0 and not data.outage_active then
+        print("[ ] No outages recorded")
+    end
+
+    for i = 1, math.min(#data.outages, 5) do
+        local item = data.outages[i]
+        print("[x] " .. item.start)
+        print("    -> " .. item.finish)
+    end
+
+    if data.outage_active then
+        print("[ ] " .. tostring(data.outage_start))
+        print("    -> POWER IS STILL OFF")
+    end
 
     print("")
-    print("Samples: " .. tostring(data.samples))
-    print("Data   : " .. DATA_FILE)
-    print("")
-    print("Automatic device discovery: ON")
+    print("Device: " .. tostring(gauge_name or "searching..."))
     print("Press Ctrl+T to stop.")
 end
 
@@ -197,34 +201,31 @@ local function main()
                 local now = os.clock()
                 local elapsed = now - last_time
 
-                -- Ignore impossible time jumps.
                 if elapsed < 0 then
                     elapsed = 0
                 elseif elapsed > 10 then
                     elapsed = SAMPLE_SECONDS
                 end
 
-                -- W * seconds / 3,600,000 = kWh
                 data.total_kwh = data.total_kwh + (power * elapsed / 3600000)
                 data.samples = data.samples + 1
-
                 last_time = now
+
+                if power <= 0.000001 then
+                    start_outage(data)
+                elseif data.outage_active then
+                    finish_outage(data)
+                end
+
                 save(data)
-                draw(data, gauge_name, gauge_type, power, true)
+                draw(data, gauge_name, gauge_type, power, power > 0.000001)
             else
                 last_time = os.clock()
                 draw(data, gauge_name, gauge_type, 0, false, read_error)
             end
         else
             last_time = os.clock()
-            draw(
-                data,
-                nil,
-                nil,
-                0,
-                false,
-                "No compatible power gauge was found."
-            )
+            draw(data, nil, nil, 0, false, "No compatible power gauge was found.")
         end
 
         sleep(SAMPLE_SECONDS)
