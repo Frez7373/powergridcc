@@ -8,7 +8,8 @@ CC:Tweaked apartment electricity meter for Create: Power Grid.
 - Does not require the gauge to be on the left side.
 - Works with peripherals connected through wired modem networks.
 - Prefers the exact `powergrid_power_gauge` peripheral type.
-- Falls back to any peripheral exposing `getPower()`.
+- Uses the current `power()` API of `powergrid_power_gauge`.
+- Supports older integrations exposing `getValue()`.
 - Reads power in watts and integrates it into cumulative kWh.
 - Saves the counter in `apartment_kwh.dat`.
 - Keeps the counter after computer restarts.
@@ -37,11 +38,19 @@ The program scans all devices using:
 peripheral.getNames()
 ```
 
-and looks for:
+and looks for the Power Grid peripheral type:
+
+```text
+powergrid_power_gauge
+```
+
+The current API is read with:
 
 ```lua
-getPower()
+power()
 ```
+
+Older CC Power Grid integrations using `getValue()` are also supported.
 
 ## Calculation
 
