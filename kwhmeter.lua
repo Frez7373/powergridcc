@@ -1,17 +1,15 @@
--- Apartment Power Meter for CC:Tweaked
--- Reads a Create: Power Grid power gauge on the LEFT side.
--- Peripheral type: powergrid_power_gauge
--- Expected method: getPower() -> power in watts (W)
+-- PowerGridCC Apartment kWh Meter
+-- Automatically discovers a Power Grid power gauge anywhere in the
+-- connected peripheral network. No fixed side is required.
+--
+-- Priority:
+-- 1. Peripheral type "powergrid_power_gauge"
+-- 2. Any peripheral exposing getPower()
+--
+-- CC:Tweaked only. No require() or external libraries.
 
-local GAUGE_SIDE = "left"
 local DATA_FILE = "apartment_kwh.dat"
 local SAMPLE_SECONDS = 1
-
-local function fail(message)
-    term.setTextColor(colors.red)
-    print("ERROR: " .. message)
-    term.setTextColor(colors.white)
-end
 
 local function save(data)
     local file = fs.open(DATA_FILE, "w")
@@ -26,7 +24,7 @@ end
 local function load()
     if not fs.exists(DATA_FILE) then
         local data = {
-            version = 1,
+            version = 2,
             total_kwh = 0,
             samples = 0
         }
@@ -48,42 +46,52 @@ local function load()
         error("Invalid data file: " .. DATA_FILE)
     end
 
-    data.version = tonumber(data.version) or 1
+    data.version = tonumber(data.version) or 2
     data.total_kwh = tonumber(data.total_kwh) or 0
     data.samples = tonumber(data.samples) or 0
 
     return data
 end
 
-local function find_gauge()
-    if not peripheral.isPresent(GAUGE_SIDE) then
-        return nil, "No peripheral on the left side"
+local function has_method(name, method)
+    local ok, methods = pcall(peripheral.getMethods, name)
+    if not ok or type(methods) ~= "table" then
+        return false
     end
 
-    local gauge = peripheral.wrap(GAUGE_SIDE)
-    if not gauge then
-        return nil, "Cannot wrap peripheral on the left side"
-    end
-
-    local has_get_power = false
-    local methods = peripheral.getMethods(GAUGE_SIDE) or {}
-
-    for _, method in ipairs(methods) do
-        if method == "getPower" then
-            has_get_power = true
-            break
+    for _, listed in ipairs(methods) do
+        if listed == method then
+            return true
         end
     end
 
-    if not has_get_power then
-        return nil, "Peripheral on the left has no getPower() method"
-    end
-
-    return gauge
+    return false
 end
 
-local function read_power(gauge)
-    local ok, value = pcall(gauge.getPower)
+local function discover_gauge()
+    local names = peripheral.getNames()
+
+    -- First prefer the exact Power Grid peripheral type.
+    for _, name in ipairs(names) do
+        local ptype = peripheral.getType(name)
+
+        if ptype == "powergrid_power_gauge" and has_method(name, "getPower") then
+            return name, ptype
+        end
+    end
+
+    -- Fallback: find any peripheral with getPower().
+    for _, name in ipairs(names) do
+        if has_method(name, "getPower") then
+            return name, peripheral.getType(name) or "unknown"
+        end
+    end
+
+    return nil, nil
+end
+
+local function read_power(name)
+    local ok, value = pcall(peripheral.call, name, "getPower")
 
     if not ok then
         return nil, "getPower() failed: " .. tostring(value)
@@ -95,84 +103,79 @@ local function read_power(gauge)
         return nil, "getPower() did not return a number"
     end
 
-    -- A household meter counts consumed energy, so use the magnitude
-    -- of the power flow. This also handles a reversed gauge connection.
+    -- Count the magnitude so reversed gauge orientation does not
+    -- produce negative apartment consumption.
     return math.abs(value)
 end
 
 local function format_energy(kwh)
-    if kwh >= 1000000 then
+    if kwh >= 1000 then
         return string.format("%.3f MWh", kwh / 1000)
     end
+
     return string.format("%.3f kWh", kwh)
 end
 
-local function draw(data, power, connected)
+local function draw(data, gauge_name, gauge_type, power, connected, error_text)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
 
     print("APARTMENT POWER METER")
-    print("---------------------")
-    print("Gauge: " .. GAUGE_SIDE)
+    print("=====================")
+    print("")
 
     if connected then
         term.setTextColor(colors.lime)
-        print("Status: CONNECTED")
+        print("Status : CONNECTED")
         term.setTextColor(colors.white)
-        print(string.format("Power : %.2f W", power or 0))
+        print("Device : " .. tostring(gauge_name))
+        print("Type   : " .. tostring(gauge_type))
+        print(string.format("Power  : %.2f W", power or 0))
     else
         term.setTextColor(colors.red)
-        print("Status: DISCONNECTED")
+        print("Status : SEARCHING")
         term.setTextColor(colors.white)
-        print("Power : --")
+        print("Device : not found")
+
+        if error_text then
+            print("")
+            term.setTextColor(colors.red)
+            print(error_text)
+            term.setTextColor(colors.white)
+        end
     end
 
     print("")
-    print("Total energy:")
+    print("TOTAL ENERGY")
     term.setTextColor(colors.yellow)
     print(format_energy(data.total_kwh))
     term.setTextColor(colors.white)
 
     print("")
     print("Samples: " .. tostring(data.samples))
+    print("Data   : " .. DATA_FILE)
     print("")
-    print("Data: " .. DATA_FILE)
-    print("")
+    print("Automatic device discovery: ON")
     print("Press Ctrl+T to stop.")
 end
 
 local function main()
     local data = load()
-
-    local gauge, gauge_error = find_gauge()
-    if not gauge then
-        fail(gauge_error)
-        print("")
-        print("Connect the power gauge to the LEFT side")
-        print("of this computer and restart kwhmeter.")
-        return
-    end
-
-    print("Starting apartment power meter...")
-    sleep(1)
-
     local last_time = os.clock()
 
     while true do
-        -- Re-check the peripheral every cycle so unplugging/reconnecting
-        -- does not permanently break the meter.
-        gauge, gauge_error = find_gauge()
+        local gauge_name, gauge_type = discover_gauge()
 
-        if gauge then
-            local power, read_error = read_power(gauge)
+        if gauge_name then
+            local power, read_error = read_power(gauge_name)
 
             if power then
                 local now = os.clock()
                 local elapsed = now - last_time
 
-                -- Protect against unusual clock jumps.
+                -- Ignore impossible time jumps.
                 if elapsed < 0 then
                     elapsed = 0
                 elseif elapsed > 10 then
@@ -184,26 +187,22 @@ local function main()
                 data.samples = data.samples + 1
 
                 last_time = now
-
-                -- Save every sample so a computer restart loses at most
-                -- the current sampling interval.
                 save(data)
-                draw(data, power, true)
+                draw(data, gauge_name, gauge_type, power, true)
             else
                 last_time = os.clock()
-                draw(data, 0, false)
-                term.setCursorPos(1, 16)
-                term.setTextColor(colors.red)
-                print(read_error)
-                term.setTextColor(colors.white)
+                draw(data, gauge_name, gauge_type, 0, false, read_error)
             end
         else
             last_time = os.clock()
-            draw(data, 0, false)
-            term.setCursorPos(1, 16)
-            term.setTextColor(colors.red)
-            print(gauge_error or "Unknown gauge error")
-            term.setTextColor(colors.white)
+            draw(
+                data,
+                nil,
+                nil,
+                0,
+                false,
+                "No power gauge with getPower() was found."
+            )
         end
 
         sleep(SAMPLE_SECONDS)
