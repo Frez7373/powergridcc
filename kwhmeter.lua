@@ -223,7 +223,7 @@ local function main()
                 nil,
                 0,
                 false,
-                "No power gauge with getPower() was found."
+                "No compatible power gauge was found."
             )
         end
 
