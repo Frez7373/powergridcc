@@ -4,7 +4,7 @@
 --
 -- Priority:
 -- 1. Peripheral type "powergrid_power_gauge"
--- 2. Any peripheral exposing getPower()
+-- 2. Compatible older gauge APIs exposing power() or getValue()
 --
 -- CC:Tweaked only. No require() or external libraries.
 
@@ -71,18 +71,20 @@ end
 local function discover_gauge()
     local names = peripheral.getNames()
 
-    -- First prefer the exact Power Grid peripheral type.
+    -- Prefer the exact Power Grid power-gauge peripheral.
     for _, name in ipairs(names) do
         local ptype = peripheral.getType(name)
 
-        if ptype == "powergrid_power_gauge" and has_method(name, "getPower") then
-            return name, ptype
+        if ptype == "powergrid_power_gauge" then
+            if has_method(name, "power") or has_method(name, "getValue") then
+                return name, ptype
+            end
         end
     end
 
-    -- Fallback: find any peripheral with getPower().
+    -- Fallback for older/custom integrations.
     for _, name in ipairs(names) do
-        if has_method(name, "getPower") then
+        if has_method(name, "power") or has_method(name, "getValue") then
             return name, peripheral.getType(name) or "unknown"
         end
     end
@@ -90,22 +92,42 @@ local function discover_gauge()
     return nil, nil
 end
 
-local function read_power(name)
-    local ok, value = pcall(peripheral.call, name, "getPower")
+local function call_number(name, method)
+    local ok, value = pcall(peripheral.call, name, method)
 
     if not ok then
-        return nil, "getPower() failed: " .. tostring(value)
+        return nil, tostring(value)
     end
 
     value = tonumber(value)
-
     if not value then
-        return nil, "getPower() did not return a number"
+        return nil, "method did not return a number"
     end
 
-    -- Count the magnitude so reversed gauge orientation does not
-    -- produce negative apartment consumption.
-    return math.abs(value)
+    return value
+end
+
+local function read_power(name)
+    -- Current Create: Power Grid CC:Tweaked API:
+    -- powergrid_power_gauge.power()
+    if has_method(name, "power") then
+        local value, err = call_number(name, "power")
+        if value then
+            return math.abs(value)
+        end
+        return nil, "power() failed: " .. tostring(err)
+    end
+
+    -- Compatibility with older CC Power Grid integrations.
+    if has_method(name, "getValue") then
+        local value, err = call_number(name, "getValue")
+        if value then
+            return math.abs(value)
+        end
+        return nil, "getValue() failed: " .. tostring(err)
+    end
+
+    return nil, "No supported power-reading method found"
 end
 
 local function format_energy(kwh)
